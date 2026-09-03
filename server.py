@@ -188,7 +188,7 @@ def ep_health(_q):
     return {
         "ok": True,
         "ts": int(time.time()),
-        "version": "0.6",
+        "version": "0.8",
         "x402_enabled": True,
         "payment_address": w["address"],
         "payment_asset": "USDC",
@@ -821,6 +821,107 @@ def ep_yield(q):
         return {"error": "yield_failed", "detail": str(e)}
 
 
+
+
+# =============================================================================
+# Bazaar discovery endpoints (v0.8)
+# =============================================================================
+
+EP_CATALOG = {
+    "free": [
+        {"path": "/api/v1/health", "name": "health", "category": "system", "description": "Service health + version info"},
+        {"path": "/api/v1/btc", "name": "btc", "category": "crypto_price", "description": "Bitcoin live price + 24h change + market cap"},
+        {"path": "/api/v1/eth", "name": "eth", "category": "crypto_price", "description": "Ethereum live price + 24h change + market cap"},
+        {"path": "/api/v1/gas", "name": "gas", "category": "gas_tracker", "description": "Ethereum gas prices (safe/propose/fast in gwei)"},
+        {"path": "/api/v1/fear-greed", "name": "fear-greed", "category": "sentiment", "description": "Crypto Fear & Greed Index (0-100)"},
+        {"path": "/api/v1/news", "name": "news", "category": "news", "description": "Latest crypto news headlines (cointelegraph)"},
+        {"path": "/api/v1/trending", "name": "trending", "category": "trending", "description": "Trending coins by search interest"},
+        {"path": "/api/v1/whale-alerts", "name": "whale-alerts", "category": "whale_alerts", "description": "Large crypto transaction alerts (>$1M)"},
+        {"path": "/api/v1/signal", "name": "signal", "category": "trading_signal", "description": "Composite crypto trading signal (multi-timeframe, 0-100)"},
+        {"path": "/api/v1/erc20-balance", "name": "erc20-balance", "category": "web3_balance", "description": "ERC20 balance for any wallet+contract on Base"},
+        {"path": "/api/v1/wiki", "name": "wiki", "category": "search", "description": "Wikipedia summary for any topic"},
+        {"path": "/api/v1/weather", "name": "weather", "category": "weather", "description": "Current weather for any city (open-meteo)"},
+        {"path": "/api/v1/token", "name": "token", "category": "web3_metadata", "description": "ERC20 token metadata (name, symbol, decimals, totalSupply)"},
+        {"path": "/api/v1/holders", "name": "holders", "category": "web3_holders", "description": "Top 20 ERC20 holders on Base"},
+        {"path": "/api/v1/balance", "name": "balance", "category": "web3_balance", "description": "Native ETH/USDC balance on Base or Ethereum"},
+        {"path": "/api/v1/tx", "name": "tx", "category": "web3_tx", "description": "Ethereum transaction details + receipt"},
+        {"path": "/api/v1/nft", "name": "nft", "category": "nft_metadata", "description": "NFT (ERC721) metadata + tokenURI + owner"},
+        {"path": "/api/v1/gh", "name": "gh", "category": "github", "description": "GitHub user profile (public data, no auth)"},
+        {"path": "/api/v1/block", "name": "block", "category": "web3_block", "description": "Latest Ethereum block info"},
+        {"path": "/api/v1/doge", "name": "doge", "category": "crypto_price", "description": "Dogecoin live price"},
+        {"path": "/api/v1/sol", "name": "sol", "category": "web3_rpc", "description": "Solana RPC proxy (getSlot, getBalance, etc.)"},
+        {"path": "/api/v1/meme", "name": "meme", "category": "meme_coins", "description": "Trending memecoins (coingecko meme category)"},
+        {"path": "/api/v1/yield", "name": "yield", "category": "defi_yield", "description": "DeFi yield opportunities by chain (DefiLlama)"},
+        {"path": "/api/v1/shorten", "name": "shorten", "category": "utility", "description": "URL shortener (in-memory)"},
+        {"path": "/api/v1/qr", "name": "qr", "category": "utility", "description": "QR code as PNG data URL"},
+        {"path": "/api/v1/rand", "name": "rand", "category": "utility", "description": "Cryptographically random number with block proof"},
+        {"path": "/api/v1/ts", "name": "ts", "category": "utility", "description": "Unix timestamp converter (any direction)"},
+        {"path": "/api/v1/ens", "name": "ens", "category": "web3_identity", "description": "ENS name lookup (forward + reverse)"},
+    ],
+    "premium": [
+        {"path": "/api/v1/premium/btc", "name": "btc", "price_usdc": "0.001", "category": "crypto_price"},
+        {"path": "/api/v1/premium/eth", "name": "eth", "price_usdc": "0.001", "category": "crypto_price"},
+        {"path": "/api/v1/premium/signal", "name": "signal", "price_usdc": "0.005", "category": "trading_signal"},
+        {"path": "/api/v1/premium/gas", "name": "gas", "price_usdc": "0.001", "category": "gas_tracker"},
+        {"path": "/api/v1/premium/fear-greed", "name": "fear-greed", "price_usdc": "0.001", "category": "sentiment"},
+        {"path": "/api/v1/premium/news", "name": "news", "price_usdc": "0.001", "category": "news"},
+        {"path": "/api/v1/premium/whale-alerts", "name": "whale-alerts", "price_usdc": "0.001", "category": "whale_alerts"},
+        {"path": "/api/v1/premium/trending", "name": "trending", "price_usdc": "0.001", "category": "trending"},
+        {"path": "/api/v1/premium/erc20-balance", "name": "erc20-balance", "price_usdc": "0.001", "category": "web3_balance"},
+        {"path": "/api/v1/premium/wiki", "name": "wiki", "price_usdc": "0.001", "category": "search"},
+        {"path": "/api/v1/premium/weather", "name": "weather", "price_usdc": "0.001", "category": "weather"},
+        {"path": "/api/v1/premium/token", "name": "token", "price_usdc": "0.001", "category": "web3_metadata"},
+        {"path": "/api/v1/premium/holders", "name": "holders", "price_usdc": "0.005", "category": "web3_holders"},
+        {"path": "/api/v1/premium/balance", "name": "balance", "price_usdc": "0.001", "category": "web3_balance"},
+        {"path": "/api/v1/premium/tx", "name": "tx", "price_usdc": "0.001", "category": "web3_tx"},
+        {"path": "/api/v1/premium/nft", "name": "nft", "price_usdc": "0.005", "category": "nft_metadata"},
+        {"path": "/api/v1/premium/gh", "name": "gh", "price_usdc": "0.001", "category": "github"},
+        {"path": "/api/v1/premium/block", "name": "block", "price_usdc": "0.001", "category": "web3_block"},
+        {"path": "/api/v1/premium/x", "name": "x", "price_usdc": "0.001", "category": "social"},
+        {"path": "/api/v1/premium/sol", "name": "sol", "price_usdc": "0.001", "category": "web3_rpc"},
+        {"path": "/api/v1/premium/yield", "name": "yield", "price_usdc": "0.005", "category": "defi_yield"},
+    ],
+}
+
+
+def ep_bazaar(_q):
+    """Bazaar discovery endpoint - full service catalog with metadata."""
+    return {
+        "service": "moneyapi",
+        "version": "0.8",
+        "homepage": "https://concern-crossword-tracker-guru.trycloudflare.com",
+        "payment_address": "0xfc9D40bf7316DBBC29984a5c0ca53c67b3164e60",
+        "payment_asset": "USDC",
+        "payment_chain": "eip155:8453",
+        "x402_version": 2,
+        "endpoints": EP_CATALOG,
+        "total_free": len(EP_CATALOG["free"]),
+        "total_premium": len(EP_CATALOG["premium"]),
+        "ts": int(time.time()),
+    }
+
+
+def ep_wellknown(_q):
+    """.well-known/x402.json - x402 standard discovery file."""
+    return {
+        "x402Version": 2,
+        "service": "moneyapi",
+        "version": "0.8",
+        "homepage": "https://concern-crossword-tracker-guru.trycloudflare.com",
+        "bazaar": {
+            "enabled": True,
+            "discovery_url": "https://concern-crossword-tracker-guru.trycloudflare.com/bazaar.json",
+        },
+        "payment": {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "asset": "USDC",
+            "asset_contract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "pay_to": "0xfc9D40bf7316DBBC29984a5c0ca53c67b3164e60",
+        }
+    }
+
+
 # Router + X402 payment gate
 # -----------------------------------------------------------------------------
 FREE_ROUTES = {
@@ -872,6 +973,9 @@ FREE_ROUTES = {
     "/api/v1/meme": ep_meme,
     "/api/v1/yield": ep_yield,
     "/api/v1/doge": ep_doge,
+    # v2.8 discovery endpoints
+    "/bazaar.json": ep_bazaar,
+    "/.well-known/x402.json": ep_wellknown,
 }
 
 PREMIUM_ENDPOINTS = {
@@ -993,31 +1097,71 @@ def serve(path, qs, handler, body=None):
     if path in PREMIUM_ENDPOINTS:
         # X402 gate — emit a Bazaar-discoverable 402 challenge
         w = load_wallet()
+        ep_name = path.split("/")[-1]
+        # Per-endpoint bazaar metadata
+        BAZAAR_META = {    "/api/v1/premium/btc": ("crypto_price", "Bitcoin live price + 24h change", ['{"symbol":"bitcoin","usd":78497,"usd_24h_change":2.3}']),
+    "/api/v1/premium/eth": ("crypto_price", "Ethereum live price + 24h change", ['{"symbol":"ethereum","usd":2417,"usd_24h_change":1.5}']),
+    "/api/v1/premium/signal": ("trading_signal", "Composite crypto trading signal (0-100 score, buy/sell/neutral)", ['{"symbol":"bitcoin","score":62,"action":"buy"}']),
+    "/api/v1/premium/gas": ("gas_tracker", "Ethereum gas prices (safe/propose/fast)", ['{"safe_gas":0.1,"propose_gas":0.16,"fast_gas":0.2}']),
+    "/api/v1/premium/fear-greed": ("sentiment", "Crypto Fear & Greed Index (0-100)", ['{"value":65,"value_classification":"Greed"}']),
+    "/api/v1/premium/news": ("news", "Latest crypto news headlines", ['{"title":"VARA partners with Securitize","url":"..."}']),
+    "/api/v1/premium/whale-alerts": ("whale_alerts", "Large crypto transaction alerts (>$1M)", ['{"amount":5000,"currency":"BTC","from":"...","to":"..."}']),
+    "/api/v1/premium/trending": ("trending", "Trending coins by search interest", ['{"coins":[{"id":"bitcoin","name":"Bitcoin"}]}']),
+    "/api/v1/premium/erc20-balance": ("web3_balance", "ERC20 token balance for any wallet+contract on Base", ['{"address":"0x...","balance_wei":12345}']),
+    "/api/v1/premium/wiki": ("search", "Wikipedia summary for any topic", ['{"title":"Bitcoin","extract":"Bitcoin is..."}']),
+    "/api/v1/premium/weather": ("weather", "Current weather for any city", ['{"city":"Tokyo","temperature":18.5}']),
+    "/api/v1/premium/token": ("web3_metadata", "ERC20 token metadata (name, symbol, decimals, totalSupply)", ['{"name":"USD Coin","symbol":"USDC","decimals":6}']),
+    "/api/v1/premium/holders": ("web3_holders", "Top 20 ERC20 holders on Base", ['{"top_holders":[{"address":"0x...","balance":1000000}]}']),
+    "/api/v1/premium/balance": ("web3_balance", "Native ETH/USDC balance on Base or Ethereum", ['{"balance_wei":12345,"usdc_balance":"0x1234"}']),
+    "/api/v1/premium/tx": ("web3_tx", "Ethereum transaction details + receipt", ['{"hash":"0x...","from":"0x...","to":"0x...","value":"0x..."}']),
+    "/api/v1/premium/nft": ("nft_metadata", "NFT (ERC721) metadata + tokenURI + owner for any chain", ['{"token_uri":"ipfs://...","owner":"0x...","metadata":{...}}']),
+    "/api/v1/premium/gh": ("github", "GitHub user profile (public data, no auth)", ['{"login":"ethereum","public_repos":321,"followers":15326}']),
+    "/api/v1/premium/block": ("web3_block", "Latest Ethereum block info (number, hash, gas, miner)", ['{"number":25897017,"gas_used":12345678}']),
+    "/api/v1/premium/x": ("social", "Public Twitter/X user profile via syndication API", ['{"handle":"vitalikbuterin","followers":3000000}']),
+    "/api/v1/premium/sol": ("web3_rpc", "Solana RPC proxy (getSlot, getBalance, etc.)", ['{"result":443980010}']),
+    "/api/v1/premium/yield": ("defi_yield", "DeFi yield opportunities by chain (DefiLlama)", ['{"pools":[{"project":"uniswap-v3","apy":12.4}]}']),
+        }
+        cat, desc, examples = BAZAAR_META.get(path, ("data", "moneyapi premium endpoint", []))
         challenge_obj = {
             "x402Version": 2,
             "accepts": [{
                 "scheme": "exact",
                 "network": NETWORK_CAIP2,
-                "maxAmountRequired": USDC_PRICE,  # in micro-USDC (6 decimals) = 0.001 USDC
+                "maxAmountRequired": USDC_PRICE,
                 "resource": path,
-                "description": f"moneyapi premium: {path.split('/')[-1]}",
+                "description": desc,
                 "mimeType": "application/json",
                 "payTo": w["address"],
                 "asset": w["asset"],
                 "assetContract": w["asset_contract"],
                 "maxTimeoutSeconds": PAYMENT_TTL_SEC,
-                "outputSchema": {"type": "object"},
-                "extra": {"name": "moneyapi / " + path.split("/")[-1]},
+                "outputSchema": {"type": "object", "example": examples[0] if examples else {}},
+                "extra": {
+                    "name": "moneyapi / " + ep_name,
+                    "version": "0.8",
+                    "homepage": "https://concern-crossword-tracker-guru.trycloudflare.com",
+                },
             }],
-            # Bazaar discovery extension (lets x402.org index us)
+            # Bazaar discovery extension (X402 v2 spec) - lets x402.org + Coinbase CDP Bazaar index us
             "extensions": {
                 "bazaar": {
                     "discoverable": True,
-                    "category": "data",
-                    "tags": ["crypto", "signals", "btc", "eth", "trading", "research", "x402"]
+                    "category": cat,
+                    "tags": ["moneyapi", "x402", "crypto", "web3", ep_name] + (["ai-agent", "trading"] if cat in ("trading_signal", "defi_yield") else []),
+                    "info": {
+                        "input": {
+                            "type": "http",
+                            "method": "GET",
+                            "queryParams": {}  # no required params for /btc, /eth, /gas, etc.
+                        },
+                        "output": {
+                            "type": "object",
+                            "example": examples[0] if examples else {}
+                        }
+                    }
                 }
             },
-            "error": "X-PAYMENT-REQUIRED: this resource costs 0.001 USDC on Base. See 'accepts' for payment details.",
+            "error": f"X-PAYMENT-REQUIRED: this resource costs 0.001 USDC on Base. See 'accepts' for payment details.",
         }
         challenge_json = json.dumps(challenge_obj)
         www_auth = f'X402 realm="moneyapi", challenge="{challenge_json}"'

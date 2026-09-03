@@ -43,7 +43,7 @@ NETWORK_CAIP2 = "eip155:8453"  # Base mainnet
 
 # Base mainnet USDC contract (verified from Coinbase docs)
 USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-BASE_RPC = "https://mainnet.base.org"  # public RPC
+BASE_RPC = "https://base.drpc.org"  # public RPC
 
 # In-memory payment cache: {tx_hash_lower: {ts, payer, amount_micro_usdc, used}}
 _payments = {}
@@ -188,7 +188,7 @@ def ep_health(_q):
     return {
         "ok": True,
         "ts": int(time.time()),
-        "version": "0.5",
+        "version": "0.6",
         "x402_enabled": True,
         "payment_address": w["address"],
         "payment_asset": "USDC",
@@ -484,7 +484,7 @@ def ep_balance(q):
     chain = (q.get("chain", ["base"])[0]).strip()
     if not address.startswith("0x") or len(address) != 42:
         return {"error": "invalid_address"}
-    rpc_url = "https://mainnet.base.org" if chain == "base" else "https://eth.llamarpc.com"
+    rpc_url = "https://base.drpc.org" if chain == "base" else "https://eth.drpc.org"
     out = {"address": address, "chain": chain, "ts": int(time.time())}
     try:
         body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":[address,"latest"]}).encode()
@@ -586,6 +586,241 @@ def ep_shorten(q):
 
 
 # -----------------------------------------------------------------------------
+def ep_nft(q):
+    """NFT metadata for any ERC721 on Base or Ethereum.
+    Query: contract, tokenid, [chain=base|ethereum]"""
+    contract = (q.get("contract", [""])[0]).strip()
+    tokenid = (q.get("tokenid", [""])[0]).strip()
+    chain = (q.get("chain", ["base"])[0]).strip()
+    if not contract.startswith("0x") or len(contract) != 42:
+        return {"error": "invalid_contract"}
+    try:
+        tokenid_int = int(tokenid)
+    except (TypeError, ValueError):
+        return {"error": "invalid_tokenid"}
+    rpc_url = "https://base.drpc.org" if chain == "base" else "https://eth.drpc.org"
+    out = {"contract": contract, "tokenid": tokenid, "chain": chain, "ts": int(time.time())}
+    try:
+        # name() 0x06fdde03, symbol() 0x95d89b41, tokenURI(uint256) 0xc87b56dd
+        # First fetch tokenURI
+        tid_hex = format(tokenid_int, "x")
+        data_uri = "0xc87b56dd" + "0" * (64 - len(tid_hex)) + tid_hex
+        body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":contract,"data":data_uri},"latest"]}).encode()
+        req = Request(rpc_url, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+        with urlopen(req, timeout=10) as r:
+            result = json.loads(r.read().decode()).get("result")
+        if result and len(result) >= 130:
+            hs = result[2:]
+            if len(hs) >= 128:
+                sl = int(hs[64:128], 16)
+                if 0 < sl < 8192:
+                    try:
+                        uri = bytes.fromhex(hs[128:128+sl*2]).decode("utf8", errors="ignore").strip("\x00")
+                        if uri.startswith("ipfs://"):
+                            uri = uri.replace("ipfs://", "https://ipfs.io/ipfs/", 1)
+                        out["token_uri"] = uri
+                        # Fetch the metadata
+                        if uri.startswith("http"):
+                            try:
+                                req2 = Request(uri, headers={"User-Agent":"moneyapi/1.0"})
+                                with urlopen(req2, timeout=10) as r2:
+                                    md = json.loads(r2.read().decode())
+                                out["metadata"] = md
+                            except Exception as e:
+                                out["metadata_error"] = str(e)[:200]
+                    except Exception: pass
+        # Owner of token
+        try:
+            data_owner = "0x6352211e" + "0" * (64 - len(tid_hex)) + tid_hex  # ownerOf(uint256)
+            body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":contract,"data":data_owner},"latest"]}).encode()
+            req = Request(rpc_url, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+            with urlopen(req, timeout=10) as r:
+                ores = json.loads(r.read().decode()).get("result")
+            if ores and len(ores) >= 66:
+                out["owner"] = "0x" + ores[-40:]
+        except Exception: pass
+        return out
+    except Exception as e:
+        return {"error": "nft_failed", "detail": str(e)}
+
+
+def ep_gh(q):
+    """GitHub user profile + repos. Query: user"""
+    user = (q.get("user", [""])[0]).strip()
+    if not user:
+        return {"error": "missing_user"}
+    try:
+        # Public API, no auth needed
+        req = Request(f"https://api.github.com/users/{user}", headers={"User-Agent":"moneyapi/1.0","Accept":"application/vnd.github+json"})
+        with urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode())
+        if "message" in data and data.get("message") == "Not Found":
+            return {"error": "user_not_found", "user": user}
+        return {
+            "login": data.get("login"),
+            "name": data.get("name"),
+            "bio": data.get("bio"),
+            "public_repos": data.get("public_repos"),
+            "followers": data.get("followers"),
+            "following": data.get("following"),
+            "created_at": data.get("created_at"),
+            "avatar_url": data.get("avatar_url"),
+            "html_url": data.get("html_url"),
+            "company": data.get("company"),
+            "location": data.get("location"),
+            "ts": int(time.time()),
+        }
+    except urllib.error.HTTPError as e:
+        if e.code == 404: return {"error": "user_not_found", "user": user}
+        return {"error": "gh_failed", "detail": e.read().decode()[:200]}
+    except Exception as e:
+        return {"error": "gh_failed", "detail": str(e)}
+
+
+def ep_block(q):
+    """Latest Ethereum block info. Query: [tag=latest|finalized|pending]"""
+    tag = (q.get("tag", ["latest"])[0]).strip()
+    try:
+        body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[tag, False]}).encode()
+        req = Request("https://eth.drpc.org", data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+        with urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode()).get("result")
+        if not data: return {"error": "block_not_found", "tag": tag}
+        return {
+            "number": int(data.get("number","0x0"), 16),
+            "hash": data.get("hash"),
+            "parent_hash": data.get("parentHash"),
+            "timestamp": int(data.get("timestamp","0x0"), 16),
+            "miner": data.get("miner"),
+            "gas_used": int(data.get("gasUsed","0x0"), 16),
+            "gas_limit": int(data.get("gasLimit","0x0"), 16),
+            "tx_count": len(data.get("transactions", [])),
+            "base_fee": int(data.get("baseFeePerGas","0x0"), 16) if data.get("baseFeePerGas") else 0,
+            "ts": int(time.time()),
+        }
+    except Exception as e:
+        return {"error": "block_failed", "detail": str(e)}
+
+
+def ep_doge(q):
+    """Dogecoin price (coingecko). No params."""
+    try:
+        req = Request("https://api.coingecko.com/api/v3/simple/price?ids=dogecoin&vs_currencies=usd&include_24hr_change=true&include_market_cap=true", headers={"User-Agent":"moneyapi/1.0"})
+        with urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode())
+        out = {"doge": d.get("dogecoin", {}), "ts": int(time.time())}
+        return out
+    except Exception as e:
+        return {"error": "doge_failed", "detail": str(e)}
+
+
+def ep_sol(q):
+    """Solana RPC proxy. Query: method, [params=json-string].
+    Methods: getBalance, getAccountInfo, getRecentBlockhash, getHealth, getSlot, getBlockTime"""
+    method = (q.get("method", ["getSlot"])[0]).strip()
+    params_str = (q.get("params", ["[]"])[0]).strip() or "[]"
+    try:
+        params = json.loads(params_str) if params_str.startswith("[") else [params_str]
+    except Exception:
+        params = []
+    try:
+        body = json.dumps({"jsonrpc":"2.0","id":1,"method":method,"params":params}).encode()
+        req = Request("https://api.mainnet-beta.solana.com", data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+        with urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode())
+        return {"method": method, "result": data.get("result"), "error": data.get("error"), "ts": int(time.time())}
+    except Exception as e:
+        return {"error": "sol_failed", "detail": str(e)}
+
+
+def ep_x(q):
+    """Twitter/X user lookup. Query: handle (no @). Returns public profile data via nitter fallback chain.
+    Note: X API is paywalled; this is best-effort public data via syndication."""
+    handle = (q.get("handle", [""])[0]).strip().lstrip("@")
+    if not handle: return {"error": "missing_handle"}
+    try:
+        # Twitter's public syndication API
+        req = Request(f"https://cdn.syndication.twimg.com/widgets/followbutton/info.json?user_names={handle}", headers={"User-Agent":"moneyapi/1.0"})
+        with urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode())
+        if not d or not isinstance(d, list):
+            return {"error": "user_not_found", "handle": handle}
+        u = d[0]
+        return {
+            "handle": u.get("screen_name"),
+            "name": u.get("name"),
+            "followers": u.get("followers_count"),
+            "description": u.get("description"),
+            "profile_image": u.get("profile_image_url"),
+            "verified": u.get("verified", False),
+            "ts": int(time.time()),
+        }
+    except urllib.error.HTTPError as e:
+        if e.code == 404: return {"error": "user_not_found", "handle": handle}
+        return {"error": "x_failed", "detail": e.read().decode()[:200]}
+    except Exception as e:
+        return {"error": "x_failed", "detail": str(e)}
+
+
+def ep_meme(q):
+    """Trending Base memecoins. No params. Returns top 10 by 24h volume."""
+    try:
+        # Use coingecko categories
+        req = Request("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&category=meme-token&order=volume_desc&per_page=10&page=1&sparkline=false&price_change_percentage=24h", headers={"User-Agent":"moneyapi/1.0"})
+        with urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode())
+        out = []
+        for c in d:
+            out.append({
+                "rank": c.get("market_cap_rank"),
+                "id": c.get("id"),
+                "symbol": c.get("symbol"),
+                "name": c.get("name"),
+                "price": c.get("current_price"),
+                "change_24h": c.get("price_change_percentage_24h"),
+                "volume_24h": c.get("total_volume"),
+                "market_cap": c.get("market_cap"),
+                "image": c.get("image"),
+            })
+        return {"trending": out, "count": len(out), "ts": int(time.time())}
+    except Exception as e:
+        return {"error": "meme_failed", "detail": str(e)}
+
+
+def ep_yield(q):
+    """DeFi yield opportunities. Query: [chain=ethereum|base|polygon], [min_tvl=1000000]"""
+    chain = (q.get("chain", ["ethereum"])[0]).strip()
+    try:
+        min_tvl = int(q.get("min_tvl", ["1000000"])[0])
+    except: min_tvl = 1_000_000
+    try:
+        url = f"https://yields.llama.fi/pools"
+        req = Request(url, headers={"User-Agent":"moneyapi/1.0"})
+        with urlopen(req, timeout=15) as r:
+            d = json.loads(r.read().decode())
+        pools = d.get("data", [])
+        out = []
+        for p in pools:
+            if p.get("chain", "").lower() != chain.lower(): continue
+            tvl = p.get("tvlUsd", 0) or 0
+            if tvl < min_tvl: continue
+            out.append({
+                "pool": p.get("pool"),
+                "project": p.get("project"),
+                "symbol": p.get("symbol"),
+                "apy": p.get("apy"),
+                "apyBase": p.get("apyBase"),
+                "apyReward": p.get("apyReward"),
+                "tvlUsd": tvl,
+            })
+            if len(out) >= 15: break
+        # Sort by APY desc
+        out.sort(key=lambda x: -(x.get("apy") or 0))
+        return {"chain": chain, "min_tvl": min_tvl, "pools": out, "ts": int(time.time())}
+    except Exception as e:
+        return {"error": "yield_failed", "detail": str(e)}
+
+
 # Router + X402 payment gate
 # -----------------------------------------------------------------------------
 FREE_ROUTES = {
@@ -628,6 +863,15 @@ FREE_ROUTES = {
         {"url": "https://github.com/krnl/moneyapi", "type": "github", "caption": "moneyapi: free + X402 premium crypto market signals API", "created_at": "2026-09-03T00:00:00Z"},
         {"url": "https://clawlancer.ai/agents/4f8982b7-1ffe-4efa-8134-aa1d212d4f7f", "type": "agent", "caption": "vrmont on Clawlancer", "created_at": "2026-09-03T09:07:00Z"},
     ]},
+    # v2.6 additions (NFT, GitHub, block, X, solana, meme, yield, doge)
+    "/api/v1/nft": ep_nft,
+    "/api/v1/gh": ep_gh,
+    "/api/v1/block": ep_block,
+    "/api/v1/x": ep_x,
+    "/api/v1/sol": ep_sol,
+    "/api/v1/meme": ep_meme,
+    "/api/v1/yield": ep_yield,
+    "/api/v1/doge": ep_doge,
 }
 
 PREMIUM_ENDPOINTS = {
@@ -647,6 +891,13 @@ PREMIUM_ENDPOINTS = {
     "/api/v1/premium/holders": ep_holders,
     "/api/v1/premium/balance": ep_balance,
     "/api/v1/premium/tx": ep_tx,
+    # v2.6 premium
+    "/api/v1/premium/nft": ep_nft,
+    "/api/v1/premium/gh": ep_gh,
+    "/api/v1/premium/block": ep_block,
+    "/api/v1/premium/x": ep_x,
+    "/api/v1/premium/sol": ep_sol,
+    "/api/v1/premium/yield": ep_yield,
 }
 
 
@@ -667,7 +918,7 @@ def _gen_research_inline(title, desc):
         if isinstance(eth, dict):
             out.append(f"- ETH: ${eth.get('usd')} ({eth.get('usd_24h_change', 0):+.2f}% 24h)")
     elif "l2" in title_low or "rollup" in title_low:
-        out.append("- L2 metrics: query Base (https://mainnet.base.org), Optimism (https://mainnet.optimism.io), Arbitrum (https://arb1.arbitrum.io)")
+        out.append("- L2 metrics: query Base (https://base.drpc.org), Optimism (https://mainnet.optimism.io), Arbitrum (https://arb1.arbitrum.io)")
         out.append("- TPS = (blocks_24h * avg_tx_per_block) / 86400")
     elif "usdc" in title_low or "stablecoin" in title_low:
         out.append("- USDC velocity on Base: query eth_getLogs on USDC contract 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")

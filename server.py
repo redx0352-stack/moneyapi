@@ -188,7 +188,7 @@ def ep_health(_q):
     return {
         "ok": True,
         "ts": int(time.time()),
-        "version": "1.0",
+        "version": "1.1",
         "x402_enabled": True,
         "payment_address": w["address"],
         "payment_asset": "USDC",
@@ -827,6 +827,204 @@ def ep_yield(q):
 # Bazaar discovery endpoints (v0.8)
 # =============================================================================
 
+def ep_security_audit(q):
+    """Security audit for an ERC20 contract. Returns risk score + flags.
+    Premium endpoint: $0.01 USDC per scan (Bankr model).
+    Query: contract (required), [chain=base|ethereum]"""
+    contract = (q.get("contract", [""])[0]).strip()
+    chain = (q.get("chain", ["base"])[0]).strip()
+    if not contract.startswith("0x") or len(contract) != 42:
+        return {"error": "invalid_contract", "expected": "0x... 20-byte hex"}
+    rpc_url = "https://base.drpc.org" if chain == "base" else "https://eth.drpc.org"
+    findings = []
+    risk_score = 0
+    info = {"contract": contract, "chain": chain, "ts": int(time.time())}
+    try:
+        for method, sel in (("decimals", "0x313ce567"), ("total_supply", "0x18160ddd")):
+            body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":contract,"data":sel},"latest"]}).encode()
+            req = Request(rpc_url, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+            with urlopen(req, timeout=10) as r:
+                rd = json.loads(r.read().decode()).get("result")
+            if rd and rd != "0x":
+                info[method] = int(rd, 16)
+        for field, sel in (("name", "0x06fdde03"), ("symbol", "0x95d89b41")):
+            body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":contract,"data":sel},"latest"]}).encode()
+            req = Request(rpc_url, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+            with urlopen(req, timeout=10) as r:
+                rd = json.loads(r.read().decode()).get("result")
+            if rd and len(rd) >= 130:
+                hs = rd[2:]
+                if len(hs) >= 128:
+                    sl = int(hs[64:128], 16)
+                    if 0 < sl < 256:
+                        try:
+                            info[field] = bytes.fromhex(hs[128:128+sl*2]).decode("utf8", errors="ignore").strip("\x00")
+                        except Exception: pass
+        owner_sel = "0x8da5cb5b"
+        body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":contract,"data":owner_sel},"latest"]}).encode()
+        req = Request(rpc_url, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+        with urlopen(req, timeout=10) as r:
+            rd = json.loads(r.read().decode()).get("result")
+        if rd and rd != "0x" and len(rd) >= 66:
+            owner = "0x" + rd[-40:]
+            if owner != "0x" + "0" * 40:
+                info["owner"] = owner
+                findings.append({"flag": "has_owner", "severity": "info", "detail": "Contract has an owner address"})
+        body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}).encode()
+        req = Request(rpc_url, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+        with urlopen(req, timeout=10) as r:
+            cur = int(json.loads(r.read().decode())["result"], 16)
+        from_block = max(0, cur - 5000)
+        log_filter = {"fromBlock":hex(from_block),"toBlock":hex(cur),"address":contract,"topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]}
+        body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[log_filter]}).encode()
+        req = Request(rpc_url, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+        with urlopen(req, timeout=20) as r:
+            logs = json.loads(r.read().decode()).get("result") or []
+        holders = {}
+        for log in logs:
+            if len(log.get("topics", [])) < 3: continue
+            frm = "0x" + log["topics"][1][-40:]
+            to = "0x" + log["topics"][2][-40:]
+            val = int(log.get("data", "0x0"), 16)
+            holders[frm] = holders.get(frm, 0) - val
+            holders[to] = holders.get(to, 0) + val
+        total = sum(max(0, v) for v in holders.values())
+        info["transfer_count"] = len(logs)
+        info["unique_addresses"] = len(holders)
+        if total > 0:
+            top_holder = max(holders.values())
+            top_pct = top_holder / total * 100
+            info["top_holder_pct"] = round(top_pct, 2)
+            if top_pct > 50:
+                findings.append({"flag": "concentrated_ownership", "severity": "high", "detail": f"Top holder owns {top_pct:.1f}% of supply"})
+                risk_score += 30
+            elif top_pct > 20:
+                findings.append({"flag": "moderate_concentration", "severity": "medium", "detail": f"Top holder owns {top_pct:.1f}% of supply"})
+                risk_score += 15
+        if risk_score == 0 and not findings:
+            findings.append({"flag": "no_immediate_red_flags", "severity": "info", "detail": "No high-risk patterns detected"})
+        if info.get("owner"):
+            risk_score += 5
+        risk_score = min(100, risk_score)
+        info["risk_score"] = risk_score
+        info["risk_level"] = "low" if risk_score < 30 else "medium" if risk_score < 60 else "high"
+        info["findings"] = findings
+        return info
+    except Exception as e:
+        return {"error": "audit_failed", "detail": str(e), "contract": contract, "chain": chain}
+
+
+def ep_swap_quote(q):
+    """Get a Uniswap V3 quote for swapping tokens on Base.
+    Query: token_in, token_out, amount_in (in wei), [fee=3000]"""
+    token_in = (q.get("token_in", [""])[0]).strip()
+    token_out = (q.get("token_out", [""])[0]).strip()
+    try:
+        fee = int(q.get("fee", ["3000"])[0])
+        amount_in = int(q.get("amount_in", ["0"])[0])
+    except:
+        return {"error": "invalid_params"}
+    if not all([token_in.startswith("0x"), token_out.startswith("0x"), len(token_in) == 42, len(token_out) == 42, amount_in > 0]):
+        return {"error": "missing_params", "required": ["token_in (0x...)", "token_out (0x...)", "amount_in (wei)"]}
+    quoter = "0xb27308f9F90F607684bbF5c6402d072838B0B10A"  # Uniswap V3 quoter on Base
+    rpc_url = "https://base.drpc.org"
+    def encode_addr(a):
+        return a.lower().replace("0x", "").zfill(64)
+    data = "0xf7729d43" + encode_addr(token_in) + encode_addr(token_out) + format(fee, "x").zfill(64) + format(amount_in, "x").zfill(64) + "00" * 32
+    body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":quoter,"data":data},"latest"]}).encode()
+    req = Request(rpc_url, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+    try:
+        with urlopen(req, timeout=15) as r:
+            result = json.loads(r.read().decode())
+        if "error" in result:
+            return {"error": "quoter_failed", "detail": str(result["error"])}
+        amount_out = int(result.get("result", "0x0"), 16)
+        return {"token_in": token_in, "token_out": token_out, "amount_in": str(amount_in), "amount_out": str(amount_out), "fee": fee, "chain": "base", "ts": int(time.time())}
+    except Exception as e:
+        return {"error": "quote_failed", "detail": str(e)}
+
+
+def ep_research(q):
+    """Generate a research brief on any crypto topic.
+    Query: topic (required), [symbol=bitcoin]"""
+    topic = (q.get("topic", [""])[0]).strip()
+    symbol = (q.get("symbol", ["bitcoin"])[0]).strip()
+    if not topic:
+        return {"error": "missing_topic"}
+    brief = {"topic": topic, "symbol": symbol, "ts": int(time.time()), "sections": {}}
+    try:
+        req = Request(f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd&include_24hr_change=true&include_market_cap=true", headers={"User-Agent":"moneyapi/1.0"})
+        with urlopen(req, timeout=10) as r:
+            brief["sections"]["price"] = json.loads(r.read().decode())
+    except Exception as e:
+        brief["sections"]["price_error"] = str(e)
+    try:
+        req = Request(f"https://en.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(topic.replace(chr(32), chr(95)))}", headers={"User-Agent":"moneyapi/1.0"})
+        with urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode())
+            brief["sections"]["context"] = {"title": d.get("title"), "extract": (d.get("extract") or "")[:500], "url": d.get("content_urls",{}).get("desktop",{}).get("page")}
+    except Exception as e:
+        brief["sections"]["context_error"] = str(e)
+    try:
+        req = Request("https://api.alternative.me/fng/", headers={"User-Agent":"moneyapi/1.0"})
+        with urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode())
+            brief["sections"]["sentiment"] = d.get("data", [{}])[0]
+    except Exception as e:
+        brief["sections"]["sentiment_error"] = str(e)
+    md = f"# Research Brief: {topic}\n\n_Generated: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}_\n\n"
+    if "price" in brief["sections"] and isinstance(brief["sections"]["price"], dict):
+        p = brief["sections"]["price"].get(symbol, {})
+        if p:
+            md += f"## Price\n\n- USD: ${p.get('usd', '?')}\n- 24h change: {p.get('usd_24h_change', 0):.2f}%\n- Market cap: ${p.get('usd_market_cap', 0):,.0f}\n\n"
+    if "context" in brief["sections"] and isinstance(brief["sections"]["context"], dict):
+        ctx = brief["sections"]["context"]
+        md += f"## Background\n\n{ctx.get('extract', '')}\n\n"
+        if ctx.get("url"):
+            md += f"Source: {ctx['url']}\n\n"
+    if "sentiment" in brief["sections"] and isinstance(brief["sections"]["sentiment"], dict):
+        s = brief["sections"]["sentiment"]
+        md += f"## Market Sentiment\n\nFear & Greed Index: **{s.get('value', '?')}** ({s.get('value_classification', '?')})\n\n"
+    brief["markdown"] = md
+    return brief
+
+
+def ep_meme_analyze(q):
+    """Memecoin launch risk analyzer. Returns risk score for a token.
+    Query: contract (required)"""
+    contract = (q.get("contract", [""])[0]).strip()
+    if not contract.startswith("0x") or len(contract) != 42:
+        return {"error": "invalid_contract"}
+    audit = ep_security_audit(q)
+    if "error" in audit:
+        return audit
+    meme_signals = {}
+    risk = audit.get("risk_score", 0)
+    if audit.get("total_supply", 0) > 10**12:
+        meme_signals["massive_supply"] = True
+        risk += 10
+    if audit.get("total_supply", 0) > 10**9:
+        meme_signals["billion_supply"] = True
+    if audit.get("top_holder_pct", 0) > 30:
+        meme_signals["whale_dominated"] = True
+        risk += 15
+    if audit.get("transfer_count", 0) < 10:
+        meme_signals["low_activity"] = True
+        risk += 20
+    if audit.get("transfer_count", 0) > 5000:
+        meme_signals["high_activity"] = True
+        risk -= 5
+    return {
+        "contract": contract,
+        "risk_score": min(100, risk),
+        "risk_level": "low" if risk < 30 else "medium" if risk < 60 else "high",
+        "audit": audit,
+        "meme_signals": meme_signals,
+        "recommendation": "avoid" if risk > 70 else "caution" if risk > 40 else "research_more",
+        "ts": int(time.time()),
+    }
+
+
 EP_CATALOG = {
     "free": [
         {"path": "/api/v1/health", "name": "health", "category": "system", "description": "Service health + version info"},
@@ -888,7 +1086,7 @@ def ep_bazaar(_q):
     """Bazaar discovery endpoint - full service catalog with metadata."""
     return {
         "service": "moneyapi",
-        "version": "1.0",
+        "version": "1.1",
         "homepage": "https://concern-crossword-tracker-guru.trycloudflare.com",
         "payment_address": "0xfc9D40bf7316DBBC29984a5c0ca53c67b3164e60",
         "payment_asset": "USDC",
@@ -906,7 +1104,7 @@ def ep_wellknown(_q):
     return {
         "x402Version": 2,
         "service": "moneyapi",
-        "version": "1.0",
+        "version": "1.1",
         "homepage": "https://concern-crossword-tracker-guru.trycloudflare.com",
         "bazaar": {
             "enabled": True,
@@ -998,7 +1196,7 @@ def ep_openapi(_q):
         "openapi": "3.1.0",
         "info": {
             "title": "moneyapi premium API",
-            "version": "1.0",
+            "version": "1.1",
             "description": "28 free + 21 premium X402 endpoints. Crypto, web3, search, weather, defi, AI agent infrastructure. Pay with USDC on Base.",
             "contact": {"name": "vrmont", "url": "https://github.com/redx0352-stack/moneyapi"},
         },
@@ -1069,6 +1267,10 @@ FREE_ROUTES = {
     "/.well-known/x402.json": ep_wellknown,
     "/.well-known/x402": ep_wellknown_x402,
     "/openapi.json": ep_openapi,
+    "/api/v1/security-audit": ep_security_audit,
+    "/api/v1/swap-quote": ep_swap_quote,
+    "/api/v1/research": ep_research,
+    "/api/v1/meme-analyze": ep_meme_analyze,
 }
 
 PREMIUM_ENDPOINTS = {
@@ -1231,7 +1433,7 @@ def serve(path, qs, handler, body=None):
                 "outputSchema": {"type": "object", "example": examples[0] if examples else {}},
                 "extra": {
                     "name": "moneyapi / " + ep_name,
-                    "version": "1.0",
+                    "version": "1.1",
                     "homepage": "https://concern-crossword-tracker-guru.trycloudflare.com",
                 },
             }],

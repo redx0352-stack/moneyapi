@@ -27,6 +27,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from urllib.parse import urlparse, parse_qs
+import urllib.parse
+import urllib.error
 
 # -----------------------------------------------------------------------------
 # Crypto payment layer
@@ -186,7 +188,7 @@ def ep_health(_q):
     return {
         "ok": True,
         "ts": int(time.time()),
-        "version": "0.4",
+        "version": "0.5",
         "x402_enabled": True,
         "payment_address": w["address"],
         "payment_asset": "USDC",
@@ -353,10 +355,241 @@ def ep_signal(q):
     }
 
 
+def ep_erc20_balance(q):
+    address = (q.get("address", [""])[0]).strip()
+    contract = (q.get("contract", ["0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"])[0]).strip()
+    if not address.startswith("0x") or len(address) != 42:
+        return {"error": "invalid_address"}
+    if not contract.startswith("0x") or len(contract) != 42:
+        return {"error": "invalid_contract"}
+    try:
+        data = "0x70a08231" + "0"*24 + address[2:].lower()
+        body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":contract,"data":data},"latest"]}).encode()
+        req = Request(BASE_RPC, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+        with urlopen(req, timeout=10) as r:
+            result = json.loads(r.read().decode()).get("result")
+        if not result or result == "0x":
+            return {"address": address, "contract": contract, "balance_raw": "0x0", "balance_wei": 0, "ts": int(time.time())}
+        return {"address": address, "contract": contract, "balance_raw": result, "balance_wei": int(result, 16), "ts": int(time.time())}
+    except Exception as e:
+        return {"error": "rpc_failed", "detail": str(e)}
+
+
+def ep_wiki(q):
+    topic = (q.get("topic", [""])[0]).strip()
+    if not topic:
+        return {"error": "missing_topic"}
+    url = "https://en.wikipedia.org/api/rest_v1/page/summary/" + urllib.parse.quote(topic.replace(" ", "_"))
+    try:
+        req = Request(url, headers={"User-Agent":"moneyapi/1.0"})
+        with urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode())
+        return {
+            "title": data.get("title"),
+            "description": data.get("description"),
+            "extract": (data.get("extract") or "")[:1000],
+            "url": data.get("content_urls",{}).get("desktop",{}).get("page"),
+            "ts": int(time.time()),
+        }
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {"error": "not_found", "topic": topic}
+        return {"error": "wiki_failed", "detail": e.read().decode()[:200]}
+    except Exception as e:
+        return {"error": "wiki_failed", "detail": str(e)}
+
+
+def ep_weather(q):
+    city = (q.get("city", [""])[0]).strip()
+    if not city:
+        return {"error": "missing_city"}
+    try:
+        geo_url = "https://geocoding-api.open-meteo.com/v1/search?name=" + urllib.parse.quote(city) + "&count=1"
+        req = Request(geo_url, headers={"User-Agent":"moneyapi/1.0"})
+        with urlopen(req, timeout=10) as r:
+            geo = json.loads(r.read().decode())
+        if not geo.get("results"):
+            return {"error": "city_not_found", "city": city}
+        g = geo["results"][0]
+        lat, lon = g["latitude"], g["longitude"]
+        wx_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&temperature_unit=celsius"
+        req = Request(wx_url, headers={"User-Agent":"moneyapi/1.0"})
+        with urlopen(req, timeout=10) as r:
+            wx = json.loads(r.read().decode())
+        return {
+            "city": g.get("name"),
+            "country": g.get("country"),
+            "lat": lat, "lon": lon,
+            "current": wx.get("current_weather", {}),
+            "ts": int(time.time()),
+        }
+    except Exception as e:
+        return {"error": "weather_failed", "detail": str(e)}
+
+
+def ep_token(q):
+    contract = (q.get("contract", [""])[0]).strip()
+    if not contract.startswith("0x") or len(contract) != 42:
+        return {"error": "invalid_contract"}
+    out = {"contract": contract, "ts": int(time.time())}
+    try:
+        for k, sel in (("decimals", "0x313ce567"), ("total_supply", "0x18160ddd")):
+            body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":contract,"data":sel},"latest"]}).encode()
+            req = Request(BASE_RPC, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+            with urlopen(req, timeout=10) as r:
+                rd = json.loads(r.read().decode()).get("result")
+            if rd and rd != "0x":
+                out[k] = int(rd, 16)
+        for field, sel in (("name", "0x06fdde03"), ("symbol", "0x95d89b41")):
+            body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":contract,"data":sel},"latest"]}).encode()
+            req = Request(BASE_RPC, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+            with urlopen(req, timeout=10) as r:
+                rd = json.loads(r.read().decode()).get("result")
+            if rd and len(rd) >= 130:
+                hs = rd[2:]
+                if len(hs) >= 128:
+                    sl = int(hs[64:128], 16)
+                    if 0 < sl < 256:
+                        try: out[field] = bytes.fromhex(hs[128:128+sl*2]).decode("utf8", errors="ignore").strip("\x00")
+                        except: pass
+        return out
+    except Exception as e:
+        return {"error": "rpc_failed", "detail": str(e)}
+
+
+def ep_holders(q):
+    contract = (q.get("contract", [""])[0]).strip()
+    if not contract.startswith("0x") or len(contract) != 42:
+        return {"error": "invalid_contract"}
+    try:
+        body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}).encode(); req = Request(BASE_RPC, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"}); cur = int(json.loads(urlopen(req, timeout=10).read().decode())["result"], 16)
+        from_block = max(0, cur - 5000)
+        lf = {"fromBlock":hex(from_block),"toBlock":hex(cur),"address":contract,"topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]}; body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[lf]}).encode(); req = Request(BASE_RPC, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"}); logs = json.loads(urlopen(req, timeout=20).read().decode()).get("result") or []
+        holders = {}
+        for log in logs:
+            if len(log.get("topics", [])) < 3: continue
+            frm = "0x" + log["topics"][1][-40:]
+            to = "0x" + log["topics"][2][-40:]
+            val = int(log.get("data", "0x0"), 16)
+            holders[frm] = holders.get(frm, 0) - val
+            holders[to] = holders.get(to, 0) + val
+        top = sorted(holders.items(), key=lambda x: -x[1])[:20]
+        return {"contract": contract, "from_block": from_block, "to_block": cur, "top_holders": [{"address":a, "balance":b} for a,b in top], "ts": int(time.time())}
+    except Exception as e:
+        return {"error": "holders_failed", "detail": str(e)}
+
+
+def ep_balance(q):
+    address = (q.get("address", [""])[0]).strip()
+    chain = (q.get("chain", ["base"])[0]).strip()
+    if not address.startswith("0x") or len(address) != 42:
+        return {"error": "invalid_address"}
+    rpc_url = "https://mainnet.base.org" if chain == "base" else "https://eth.llamarpc.com"
+    out = {"address": address, "chain": chain, "ts": int(time.time())}
+    try:
+        body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":[address,"latest"]}).encode()
+        req = Request(rpc_url, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+        with urlopen(req, timeout=10) as r:
+            result = json.loads(r.read().decode()).get("result")
+        if result: out["balance_wei"] = int(result, 16)
+        if chain == "base":
+            usdc = "0x70a08231" + "0"*24 + address[2:].lower()
+            body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913","data":usdc},"latest"]}).encode()
+            req = Request(rpc_url, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+            with urlopen(req, timeout=10) as r:
+                usdc_result = json.loads(r.read().decode()).get("result")
+            if usdc_result: out["usdc_balance_raw"] = usdc_result
+        return out
+    except Exception as e:
+        return {"error": "balance_failed", "detail": str(e)}
+
+
+def ep_tx(q):
+    tx_hash = (q.get("hash", [""])[0]).strip()
+    if not tx_hash.startswith("0x") or len(tx_hash) != 66:
+        return {"error": "invalid_hash"}
+    out = {"hash": tx_hash, "ts": int(time.time())}
+    try:
+        for field, method in (("tx", "eth_getTransactionByHash"), ("receipt", "eth_getTransactionReceipt")):
+            body = json.dumps({"jsonrpc":"2.0","id":1,"method":method,"params":[tx_hash]}).encode()
+            req = Request(BASE_RPC, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+            with urlopen(req, timeout=10) as r:
+                result = json.loads(r.read().decode()).get("result")
+            if result: out[field] = result
+        return out
+    except Exception as e:
+        return {"error": "tx_failed", "detail": str(e)}
+
+
+def ep_ts(q):
+    from datetime import datetime, timezone as tz
+    ts_str = (q.get("ts", [""])[0]).strip()
+    date_str = (q.get("date", [""])[0]).strip()
+    out = {"ts": int(time.time())}
+    try:
+        if ts_str:
+            ts = int(ts_str)
+            dt = datetime.fromtimestamp(ts, tz=tz.utc)
+            out["input_ts"] = ts
+            out["utc"] = dt.isoformat()
+            out["unix"] = ts
+        elif date_str:
+            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            out["input_date"] = date_str
+            out["unix"] = int(dt.timestamp())
+            out["utc"] = dt.isoformat()
+        else:
+            out["now_unix"] = int(time.time())
+            out["utc"] = datetime.now(tz=tz.utc).isoformat()
+        return out
+    except Exception as e:
+        return {"error": "ts_failed", "detail": str(e)}
+
+
+def ep_rand(q):
+    import secrets
+    try:
+        lo = int(q.get("min", ["1"])[0])
+        hi = int(q.get("max", ["100"])[0])
+        count = min(int(q.get("count", ["1"])[0]), 100)
+        if lo >= hi or hi - lo > 1_000_000_000:
+            return {"error": "invalid_range"}
+        nums = [secrets.randbelow(hi - lo) + lo for _ in range(count)]
+        try:
+            body = json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}).encode()
+            req = Request(BASE_RPC, data=body, headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"})
+            with urlopen(req, timeout=5) as r:
+                block = int(json.loads(r.read().decode())["result"], 16)
+        except Exception:
+            block = 0
+        return {"numbers": nums, "min": lo, "max": hi, "count": count, "block": block, "ts": int(time.time())}
+    except Exception as e:
+        return {"error": "rand_failed", "detail": str(e)}
+
+
+def ep_shorten(q):
+    import base64 as b64
+    url = (q.get("url", [""])[0]).strip()
+    if not url.startswith(("http://", "https://")):
+        return {"error": "invalid_url"}
+    import hashlib
+    h = hashlib.sha256(url.encode()).hexdigest()[:8]
+    short = b64.urlsafe_b64encode(h.encode()).decode().rstrip("=")[:10]
+    out = {"url": url, "short": f"https://mnyapi.xyz/{short}", "id": h, "ts": int(time.time())}
+    store = {}
+    try:
+        with open("/data/shortener.json") as f: store = json.load(f)
+    except Exception: pass
+    store[h] = url
+    with open("/data/shortener.json","w") as f: json.dump(store, f)
+    return out
+
+
 # -----------------------------------------------------------------------------
 # Router + X402 payment gate
 # -----------------------------------------------------------------------------
 FREE_ROUTES = {
+    # Core crypto market signals (v0.4)
     "/api/v1/health": ep_health,
     "/api/v1/fear-greed": ep_fear_greed,
     "/api/v1/gas": ep_gas,
@@ -366,6 +599,17 @@ FREE_ROUTES = {
     "/api/v1/news": ep_news,
     "/api/v1/whale-alerts": ep_whale_alerts,
     "/api/v1/signal": ep_signal,
+    # v2.5 additions (Tier 1, 3, 4, 5, 6)
+    "/api/v1/erc20-balance": ep_erc20_balance,
+    "/api/v1/wiki": ep_wiki,
+    "/api/v1/weather": ep_weather,
+    "/api/v1/token": ep_token,
+    "/api/v1/holders": ep_holders,
+    "/api/v1/balance": ep_balance,
+    "/api/v1/tx": ep_tx,
+    "/api/v1/shorten": ep_shorten,
+    "/api/v1/rand": ep_rand,
+    "/api/v1/ts": ep_ts,
     # Atelier agent protocol endpoints (for marketplace listing)
     "/agent/profile": lambda _q: {
         "name": "vrmont",
@@ -375,38 +619,14 @@ FREE_ROUTES = {
         "wallet_address": "0xfc9D40bf7316DBBC29984a5c0ca53c67b3164e60",
     },
     "/agent/services": lambda _q: {"services": [
-        {
-            "id": "moneyapi_btc",
-            "title": "BTC price snapshot",
-            "description": "Returns current Bitcoin price, 24h change, market cap via moneyapi.",
-            "price_usd": "0.001",
-            "category": "data",
-        },
-        {
-            "id": "moneyapi_signal",
-            "title": "Composite trading signal (any symbol)",
-            "description": "Score 0-100 + buy/sell/neutral action for any of 8 supported symbols (BTC/ETH/SOL/DOGE/ADA/XRP/DOT/TRX).",
-            "price_usd": "0.005",
-            "category": "analysis",
-        },
-        {
-            "id": "moneyapi_research",
-            "title": "Crypto market research brief",
-            "description": "Markdown research brief on any crypto topic: L2 rollups, stablecoins, on-chain trends, EIP proposals, gas patterns. Live data via moneyapi.",
-            "price_usd": "0.10",
-            "category": "research",
-        },
-        {
-            "id": "moneyapi_tweet",
-            "title": "Agent economy tweet thread",
-            "description": "Viral-style 7-tweet thread on a crypto/agent topic with live data points.",
-            "price_usd": "0.05",
-            "category": "writing",
-        },
+        {"id": "moneyapi_btc", "title": "BTC price snapshot", "description": "Live BTC price via moneyapi.", "price_usd": "0.001", "category": "data"},
+        {"id": "moneyapi_signal", "title": "Composite crypto trading signal (8 symbols)", "description": "Score 0-100 + buy/sell/neutral for BTC/ETH/SOL/DOGE/ADA/XRP/DOT/TRX.", "price_usd": "0.005", "category": "trading"},
+        {"id": "moneyapi_research", "title": "Crypto market research brief", "description": "Markdown research brief on any crypto topic.", "price_usd": "0.10", "category": "research"},
+        {"id": "moneyapi_tweet", "title": "Agent economy tweet thread", "description": "7-tweet thread on a crypto/agent topic with live data.", "price_usd": "0.05", "category": "writing"},
     ]},
     "/agent/portfolio": lambda _q: {"works": [
         {"url": "https://github.com/krnl/moneyapi", "type": "github", "caption": "moneyapi: free + X402 premium crypto market signals API", "created_at": "2026-09-03T00:00:00Z"},
-        {"url": "https://clawlancer.ai/agents/4f8982b7-1ffe-4efa-8134-aa1d212d4f7f", "type": "agent", "caption": "vrmont on Clawlancer: agent marketplace profile", "created_at": "2026-09-03T09:07:00Z"},
+        {"url": "https://clawlancer.ai/agents/4f8982b7-1ffe-4efa-8134-aa1d212d4f7f", "type": "agent", "caption": "vrmont on Clawlancer", "created_at": "2026-09-03T09:07:00Z"},
     ]},
 }
 
@@ -419,6 +639,14 @@ PREMIUM_ENDPOINTS = {
     "/api/v1/premium/news": ep_news,
     "/api/v1/premium/whale-alerts": ep_whale_alerts,
     "/api/v1/premium/trending": ep_trending,
+    # v2.5 additions
+    "/api/v1/premium/erc20-balance": ep_erc20_balance,
+    "/api/v1/premium/wiki": ep_wiki,
+    "/api/v1/premium/weather": ep_weather,
+    "/api/v1/premium/token": ep_token,
+    "/api/v1/premium/holders": ep_holders,
+    "/api/v1/premium/balance": ep_balance,
+    "/api/v1/premium/tx": ep_tx,
 }
 
 

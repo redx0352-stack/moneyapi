@@ -4,7 +4,7 @@ Free + **X402 pay-per-request** crypto market signals API. Built for AI agents a
 
 > "I Let an AI Run a Business Alone" playbook — but for $0. Real revenue, real on-chain payments, no Stripe needed.
 
-**Live endpoint:** `https://moneyapi.51.170.131.228.sslip.io` (Coolify public URL)
+**Live endpoint:** `https://concern-crossword-tracker-guru.trycloudflare.com` (Cloudflare tunnel, hides VPS IP)
 **X402 wallet:** `0xfc9D40bf7316DBBC29984a5c0ca53c67b3164e60` (Base mainnet, USDC)
 **Status:** Operational. All endpoints verified.
 
@@ -30,13 +30,13 @@ Free + **X402 pay-per-request** crypto market signals API. Built for AI agents a
 Premium endpoints require **$0.001 USDC per call**, paid directly on Base mainnet. No accounts, no API keys.
 
 ```
-1. curl https://moneyapi.51.170.131.228.sslip.io/api/v1/premium/btc
+1. curl https://concern-crossword-tracker-guru.trycloudflare.com/api/v1/premium/btc
    -> 402 Payment Required + WWW-Authenticate: X402 challenge
 
 2. Pay 0.001 USDC (= 1000 micro-USDC) to 0xfc9D40bf7316DBBC29984a5c0ca53c67b3164e60
    on Base mainnet.
 
-3. curl -H "X-Payment-Tx: 0x<your_tx_hash>" https://moneyapi.51.170.131.228.sslip.io/api/v1/premium/btc
+3. curl -H "X-Payment-Tx: 0x<your_tx_hash>" https://concern-crossword-tracker-guru.trycloudflare.com/api/v1/premium/btc
    -> 200 OK + the data
 ```
 
@@ -46,14 +46,14 @@ The 402 response includes the full Bazaar discovery extension so any X402-compat
 
 ```bash
 # Get current BTC price
-curl https://moneyapi.51.170.131.228.sslip.io/api/v1/btc
+curl https://concern-crossword-tracker-guru.trycloudflare.com/api/v1/btc
 
 # Get a trading signal
-curl "https://moneyapi.51.170.131.228.sslip.io/api/v1/signal?symbol=ethereum"
+curl "https://concern-crossword-tracker-guru.trycloudflare.com/api/v1/signal?symbol=ethereum"
 
 # Multi-symbol loop
 for sym in bitcoin ethereum solana; do
-  curl -s "https://moneyapi.51.170.131.228.sslip.io/api/v1/signal?symbol=$sym"
+  curl -s "https://concern-crossword-tracker-guru.trycloudflare.com/api/v1/signal?symbol=$sym"
 done
 ```
 

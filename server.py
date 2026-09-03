@@ -188,7 +188,7 @@ def ep_health(_q):
     return {
         "ok": True,
         "ts": int(time.time()),
-        "version": "0.8",
+        "version": "1.0",
         "x402_enabled": True,
         "payment_address": w["address"],
         "payment_asset": "USDC",
@@ -888,7 +888,7 @@ def ep_bazaar(_q):
     """Bazaar discovery endpoint - full service catalog with metadata."""
     return {
         "service": "moneyapi",
-        "version": "0.8",
+        "version": "1.0",
         "homepage": "https://concern-crossword-tracker-guru.trycloudflare.com",
         "payment_address": "0xfc9D40bf7316DBBC29984a5c0ca53c67b3164e60",
         "payment_asset": "USDC",
@@ -906,7 +906,7 @@ def ep_wellknown(_q):
     return {
         "x402Version": 2,
         "service": "moneyapi",
-        "version": "0.8",
+        "version": "1.0",
         "homepage": "https://concern-crossword-tracker-guru.trycloudflare.com",
         "bazaar": {
             "enabled": True,
@@ -924,6 +924,97 @@ def ep_wellknown(_q):
 
 # Router + X402 payment gate
 # -----------------------------------------------------------------------------
+
+def ep_wellknown_x402(_q):
+    """Official /.well-known/x402 discovery endpoint per x402scan spec."""
+    base = "https://concern-crossword-tracker-guru.trycloudflare.com"
+    resources = []
+    for entry in EP_CATALOG.get("premium", []):
+        resources.append(base + entry["path"])
+    return {
+        "version": 1,
+        "resources": resources,
+        "ownershipProofs": ["0xfc9D40bf7316DBBC29984a5c0ca53c67b3164e60"],
+        "instructions": "Premium endpoints return 402 + X402 challenge. Pay USDC on Base, retry with X-Payment-Tx header.",
+        "facilitator": "x402.org (testnet) - self-settle on Base mainnet",
+        "service": "moneyapi",
+        "homepage": base,
+    }
+
+
+def ep_openapi(_q):
+    """OpenAPI 3.1 spec for x402scan OpenAPI-first discovery."""
+    base = "https://concern-crossword-tracker-guru.trycloudflare.com"
+    paths = {}
+    # Map of endpoint path -> params (for required params)
+    PARAM_MAP = {
+        "erc20-balance": [{"name": "address", "type": "string"}, {"name": "contract", "type": "string"}],
+        "balance": [{"name": "address", "type": "string"}],
+        "token": [{"name": "contract", "type": "string"}],
+        "holders": [{"name": "contract", "type": "string"}],
+        "tx": [{"name": "hash", "type": "string"}],
+        "nft": [{"name": "contract", "type": "string"}, {"name": "tokenid", "type": "string"}],
+        "wiki": [{"name": "topic", "type": "string"}],
+        "weather": [{"name": "city", "type": "string"}],
+        "yield": [],
+        "gh": [{"name": "user", "type": "string"}],
+        "x": [{"name": "handle", "type": "string"}],
+        "sol": [{"name": "method", "type": "string"}],
+    }
+    REQUIRED = {"address", "contract", "topic", "user", "city", "method", "hash", "tokenid"}
+    for entry in EP_CATALOG.get("premium", []):
+        path = entry["path"]
+        short = path.split("/")[-1]
+        params = PARAM_MAP.get(short, [])
+        # Premium entries have: path, name, price_usdc, category
+        # Build a description from category + name
+        desc = entry.get("category", "data") + " - " + entry.get("name", short)
+        op = {
+            "get": {
+                "summary": desc,
+                "description": desc + " (premium X402 endpoint, $0.001 USDC on Base)",
+                "operationId": "get_" + short.replace("-", "_"),
+                "parameters": [{"name": p["name"], "in": "query", "schema": {"type": p["type"]}, "description": p["name"]} for p in params],
+                "responses": {
+                    "200": {"description": "Successful response with data + X-Payment-Verified header"},
+                    "402": {"description": "Payment Required - X402 challenge"},
+                },
+                "x-payment-info": {
+                    "protocols": ["x402"],
+                    "price": {"mode": "fixed", "currency": "USD", "amount": "0.001"},
+                    "network": "eip155:8453",
+                    "asset": "USDC",
+                    "payTo": "0xfc9D40bf7316DBBC29984a5c0ca53c67b3164e60",
+                },
+            }
+        }
+        op["get"]["parameters"] = [
+            {"name": p["name"], "in": "query", "required": True, "schema": {"type": p["type"]}, "description": p["name"]} for p in params if p["name"] in REQUIRED
+        ] + [
+            {"name": p["name"], "in": "query", "schema": {"type": p["type"]}, "description": p["name"]} for p in params if p["name"] not in REQUIRED
+        ]
+        paths[path] = op
+    spec = {
+        "openapi": "3.1.0",
+        "info": {
+            "title": "moneyapi premium API",
+            "version": "1.0",
+            "description": "28 free + 21 premium X402 endpoints. Crypto, web3, search, weather, defi, AI agent infrastructure. Pay with USDC on Base.",
+            "contact": {"name": "vrmont", "url": "https://github.com/redx0352-stack/moneyapi"},
+        },
+        "servers": [{"url": base}],
+        "x-discovery": {
+            "ownershipProofs": ["0xfc9D40bf7316DBBC29984a5c0ca53c67b3164e60"],
+            "paymentAddress": "0xfc9D40bf7316DBBC29984a5c0ca53c67b3164e60",
+            "paymentNetwork": "eip155:8453",
+            "paymentAsset": "USDC",
+            "assetContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        },
+        "paths": paths,
+    }
+    return spec
+
+
 FREE_ROUTES = {
     # Core crypto market signals (v0.4)
     "/api/v1/health": ep_health,
@@ -976,6 +1067,8 @@ FREE_ROUTES = {
     # v2.8 discovery endpoints
     "/bazaar.json": ep_bazaar,
     "/.well-known/x402.json": ep_wellknown,
+    "/.well-known/x402": ep_wellknown_x402,
+    "/openapi.json": ep_openapi,
 }
 
 PREMIUM_ENDPOINTS = {
@@ -1138,7 +1231,7 @@ def serve(path, qs, handler, body=None):
                 "outputSchema": {"type": "object", "example": examples[0] if examples else {}},
                 "extra": {
                     "name": "moneyapi / " + ep_name,
-                    "version": "0.8",
+                    "version": "1.0",
                     "homepage": "https://concern-crossword-tracker-guru.trycloudflare.com",
                 },
             }],
